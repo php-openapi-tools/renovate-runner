@@ -1,0 +1,97 @@
+name: Renovate
+
+on:
+  schedule:
+    - cron: "0 6-22/2 * * 1-5"
+    - cron: "0 12-23/2 * * 0,6"
+  push:
+    branches:
+      - 'main'
+  issues:
+    types:
+      - edited
+
+concurrency:
+  group: 'renovate'
+  cancel-in-progress: true
+
+jobs:
+  fetch-repositories:
+    name: Fetch Repositories
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.groups.outputs.result }}
+    steps:
+      - name: Generate App Token for GraphQL
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.RENOVATE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RENOVATE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        id: groups
+        env:
+          REPOSITORY_SEARCH_QUERY: ${{ vars.RENOVATE_REPOSITORY_SEARCH_QUERY }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const query = `query myPublicRepos($queryString: String!, $after: String) {
+              search(query: $queryString, type: REPOSITORY, first: 3, after: $after) {
+                repositoryCount
+                edges {
+                  node {
+                    ... on Repository {
+                      name
+                    }
+                  }
+                }
+                pageInfo {
+                  endCursor
+                  startCursor
+                  hasNextPage
+                  hasPreviousPage
+                }
+              }
+            }`;
+            const queryString = process.env.REPOSITORY_SEARCH_QUERY
+              || `owner:${context.repo.owner} is:public fork:false archived:false sort:updated-desc`;
+            let groups = [];
+            let after = null;
+            let tick = true;
+            do {
+              let repositories = [];
+              const result = await github.graphql(query, {
+                queryString: queryString,
+                after: after,
+              });
+              after = result.search.pageInfo.endCursor;
+              tick = result.search.pageInfo.hasNextPage;
+              for (const edge of result.search.edges) {
+                repositories.push(edge.node.name);
+              }
+              groups.push(repositories.join(","));
+            } while (tick);
+            return groups;
+  renovate:
+    name: Renovate
+    runs-on: ubuntu-latest
+    needs:
+      - fetch-repositories
+    strategy:
+      fail-fast: false
+      matrix:
+        repositories: ${{ fromJson(needs.fetch-repositories.outputs.groups) }}
+    steps:
+      - name: Generate App Token for Renovate
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.RENOVATE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RENOVATE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ matrix.repositories }}
+      - name: Renovate
+        uses: WyriHaximus/github-action-renovatebot@97cd2504b9002d4fb326a6e077edd5b8e94ec155 # v0.16.0
+        with:
+          renovateAppToken: ${{ steps.app-token.outputs.token }}
